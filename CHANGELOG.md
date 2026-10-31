@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-10-31
+
+### Added
+- **Single-command sign-off (`-y` / `--yes`)**: `tk d <ids> -y`, `tk d --pending -y`, and `tk auto <ids> -y` skip the interactive `[y/N]` prompt at a terminal.
+- **Non-TTY human runner policy**: set `allow_non_tty_yes = true` under `[policy]` in `config.toml` to allow `tk d -y` and `tk auto -y` from non-TTY human runners (Raycast, Obsidian shell plugins) when no AI agent session environment variables (`CLAUDE_SESSION_ID`, `CODEX_*`, `HERMES_*`, `AGY_CONVERSATION_ID`, `SESSION_ID`, etc.) are present.
+- **Glama MCP & Docker support**: added `Dockerfile` and `glama.json` (#5, #6), running `tkmd mcp --local` with `HOME=/tmp` so cards persist in the mounted `/workspace/tasks` directory.
+
+### Fixed
+- **Eval pinning without `git` on `PATH` (#4)**: replaced `git hash-object` subprocess calls in `eval_inputs` with an in-process 128-bit content fingerprint + byte length + `:x` executable bit, so script pinning is always active even when `git` is not installed.
+- **Transitive sourced script pinning (#3)**: `eval_inputs` now scans pinned scripts for sourced or referenced workspace files (`source`, `.`, relative paths) up to `MAX_EVAL_INPUTS` (32 files) and pins them alongside the top-level script.
+
+### Changed
+- **Modularized store engine**: split the 4,733-line `src/store.rs` monolith into focused submodules (`src/store/{mod,lock,config,eval,receipt,doctor,tests}.rs`).
+
 ## [0.2.1] - 2026-10-21
 
 ### Security
