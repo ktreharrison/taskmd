@@ -187,6 +187,9 @@ enum Commands {
         /// Close every task awaiting sign-off (`pending-close`) after one confirmation
         #[arg(long)]
         pending: bool,
+        /// Skip the interactive `[y/N]` confirmation prompt (requires a terminal, or `[policy] allow_non_tty_yes = true`)
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
         /// Accept a check (eval command or its script) that changed since the task was claimed
         #[arg(long)]
         accept_changed_eval: bool,
@@ -363,6 +366,9 @@ enum Commands {
         /// Turn auto-accept off (manual sign-off again)
         #[arg(long)]
         off: bool,
+        /// Skip the interactive `[y/N]` confirmation prompt (requires a terminal, or `[policy] allow_non_tty_yes = true`)
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
     /// Archive completed tasks: moves done task .md cards into tasks/archive/ (preserves .events.jsonl DB)
     Archive {
@@ -1374,6 +1380,7 @@ pub fn run() -> Result<()> {
         Commands::Done {
             ids,
             pending,
+            yes,
             accept_changed_eval,
             actor,
             note,
@@ -1384,7 +1391,7 @@ pub fn run() -> Result<()> {
                 println!("{GREEN}  ✨ No tasks awaiting sign-off.{RESET}");
                 return Ok(());
             }
-            let approval = cli_approval(&store, &cards)?;
+            let approval = cli_approval(&store, &cards, yes)?;
             let mut failed = 0;
             for card in &cards {
                 // Bind each approval to the receipt shown in the summary.
@@ -2405,7 +2412,7 @@ pub fn run() -> Result<()> {
                 anyhow::bail!("{} integrity issue(s)", issues.len());
             }
         }
-        Commands::Auto { ids, off } => {
+        Commands::Auto { ids, off, yes } => {
             let cards = ids
                 .iter()
                 .map(|id| store.find_task(id))
@@ -2420,7 +2427,7 @@ pub fn run() -> Result<()> {
                 }
                 return Ok(());
             }
-            let approval = if is_interactive() {
+            let approval = if is_interactive() || non_tty_yes_allowed(&store, yes) {
                 let mut err = std::io::stderr();
                 use std::io::Write;
                 writeln!(
@@ -2440,7 +2447,7 @@ pub fn run() -> Result<()> {
                             .unwrap_or("(no eval: cannot auto-accept)")
                     )?;
                 }
-                if !confirm("Approve these checks?")? {
+                if !yes && !confirm("Approve these checks?")? {
                     anyhow::bail!("Not approved: nothing changed");
                 }
                 Approval::Interactive
@@ -2730,13 +2737,15 @@ fn done_targets(store: &TaskStore, ids: &[String], pending: bool) -> Result<Vec<
 }
 
 /// Decide how `tk done` may approve. A person must be at an interactive terminal (stdin and
-/// stderr are TTYs); agents, pipes and scripts get `Untrusted`, which can only submit for review.
-/// Several tasks are summarised together and confirmed with one answer.
+/// stderr are TTYs), or pass `-y` / `--yes` when `[policy] allow_non_tty_yes = true` is enabled
+/// and no AI agent session environment variables are set; agents, pipes and scripts otherwise get
+/// `Untrusted`, which can only submit for review.
+/// Several tasks are summarised together and confirmed with one answer (or skipped with `-y`).
 /// Limitation: an agent that allocates its own pseudo-terminal passes the TTY check. This is a
 /// workflow harness, not authentication.
-fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
+fn cli_approval(store: &TaskStore, cards: &[TaskCard], yes: bool) -> Result<Approval> {
     use std::io::Write;
-    if !is_interactive() {
+    if !is_interactive() && !non_tty_yes_allowed(store, yes) {
         return Ok(Approval::Untrusted);
     }
     // Only cards that would actually close need sign-off; agent-owned work is routed to review.
@@ -2798,15 +2807,30 @@ fn cli_approval(store: &TaskStore, cards: &[TaskCard]) -> Result<Approval> {
             )?;
         }
     }
-    let target = if closing.len() == 1 {
-        closing[0].meta.id.clone()
-    } else {
-        format!("all {}", closing.len())
-    };
-    if !confirm(&format!("Approve and close {}?", target))? {
-        anyhow::bail!("Not approved: nothing closed");
+    if !yes {
+        let target = if closing.len() == 1 {
+            closing[0].meta.id.clone()
+        } else {
+            format!("all {}", closing.len())
+        };
+        if !confirm(&format!("Approve and close {}?", target))? {
+            anyhow::bail!("Not approved: nothing closed");
+        }
     }
     Ok(Approval::Interactive)
+}
+
+/// True when the user explicitly passed `-y` / `--yes`, `[policy] allow_non_tty_yes = true` is
+/// configured (locally or globally), and no AI agent session environment variable is present.
+fn non_tty_yes_allowed(store: &TaskStore, yes: bool) -> bool {
+    if !yes || TaskStore::detect_env_session_id().is_some() {
+        return false;
+    }
+    store.config.policy.allow_non_tty_yes
+        || store
+            .peer
+            .as_ref()
+            .is_some_and(|p| p.config.policy.allow_non_tty_yes)
 }
 
 /// A person is at the keyboard: stdin and stderr are both terminals.
@@ -3002,13 +3026,38 @@ mod tests {
             .unwrap()
             .command
         {
-            Some(Commands::Auto { ids, off }) => {
+            Some(Commands::Auto { ids, off, yes }) => {
                 assert_eq!(ids, vec!["1", "2"]);
                 assert!(!off);
+                assert!(!yes);
             }
             other => panic!("Expected Auto, got {:?}", other),
         }
         assert!(Cli::try_parse_from(["tk", "auto"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_done_and_auto_yes_flag() {
+        match Cli::try_parse_from(["tk", "d", "1", "-y"])
+            .unwrap()
+            .command
+        {
+            Some(Commands::Done { ids, yes, .. }) => {
+                assert_eq!(ids, vec!["1"]);
+                assert!(yes);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+        match Cli::try_parse_from(["tk", "auto", "1", "-y"])
+            .unwrap()
+            .command
+        {
+            Some(Commands::Auto { ids, yes, .. }) => {
+                assert_eq!(ids, vec!["1"]);
+                assert!(yes);
+            }
+            other => panic!("Expected Auto, got {:?}", other),
+        }
     }
 
     #[test]

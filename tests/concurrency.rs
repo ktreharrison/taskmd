@@ -34,10 +34,23 @@ impl Sandbox {
             .env("HOME", self.root.join("home"))
             .env("USER", "tester")
             .env("TASKMD_DIR", self.vault())
-            .env("NO_COLOR", "1")
-            .env_remove("CLAUDE_SESSION_ID")
-            .env_remove("SESSION_ID")
-            .stdin(Stdio::null())
+            .env("NO_COLOR", "1");
+        for var in [
+            "AGY_CONVERSATION_ID",
+            "ANTIGRAVITY_CONVERSATION_ID",
+            "CLAUDE_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "HERMES_SESSION_ID",
+            "OPENCODE_SESSION_ID",
+            "PI_SESSION_ID",
+            "GEMINI_SESSION_ID",
+            "AGENT_SESSION_ID",
+            "SESSION_ID",
+        ] {
+            c.env_remove(var);
+        }
+        c.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         c
@@ -270,6 +283,7 @@ fn agents_cannot_close_work_from_the_cli() {
     sb.ok(&["r", "1", "-a", "claude"]);
     for args in [
         vec!["d", "1"],
+        vec!["d", "1", "-y"],
         vec!["d", "1", "-a", "tester"],
         vec!["d", "--pending"],
     ] {
@@ -283,6 +297,42 @@ fn agents_cannot_close_work_from_the_cli() {
     assert_eq!(
         Sandbox::field(&sb.card("tk-001"), "status").as_deref(),
         Some("pending-close")
+    );
+}
+
+#[test]
+fn non_tty_yes_policy_allows_human_runners_and_blocks_agent_env() {
+    let sb = Sandbox::new("nonttyyes");
+    sb.ok(&["add", "p1 raycast task"]);
+    sb.ok(&["r", "1", "-a", "claude"]);
+
+    let cfg = sb.root.join("home/.config/tkmd/config.toml");
+    let text = std::fs::read_to_string(&cfg)
+        .unwrap()
+        .replace("allow_non_tty_yes = false", "allow_non_tty_yes = true");
+    std::fs::write(&cfg, text).unwrap();
+
+    // Without `-y`, non-TTY still cannot close.
+    assert!(!sb.tk(&["d", "1"]).status.success());
+
+    // Even with `-y` and `allow_non_tty_yes = true`, an agent session env var blocks sign-off.
+    let mut agent_cmd = sb.cmd(&["d", "1", "-y"]);
+    agent_cmd.env("CLAUDE_SESSION_ID", "agent-session-123");
+    let agent_out = agent_cmd.output().unwrap();
+    assert!(
+        !agent_out.status.success(),
+        "agent env var must block -y in non-TTY"
+    );
+    assert_eq!(
+        Sandbox::field(&sb.card("tk-001"), "status").as_deref(),
+        Some("pending-close")
+    );
+
+    // Clean human runner (Raycast / Obsidian) with `-y` closes the task.
+    sb.ok(&["d", "1", "-y"]);
+    assert_eq!(
+        Sandbox::field(&sb.card("tk-001"), "status").as_deref(),
+        Some("done")
     );
 }
 

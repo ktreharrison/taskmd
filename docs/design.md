@@ -127,17 +127,19 @@ AI agents cannot close tasks directly during autonomous execution. `tkmd` enforc
 
 Who is calling does not come from the `--actor` name. Approval is decided by how `tk done` runs:
 - **Untrusted callers** (MCP, scripts, and agents whose shell has no terminal): can submit for review, can never mark `done`.
-- **Pinned check**: the first claim pins the eval command and a git blob hash of each repo file it names. Re-claiming does not reset the pin. If the check changed by sign-off time, `tk d` refuses and says what changed; pass `--accept-changed-eval` to accept it knowingly. Name the check's script in the eval (`sh scripts/check.sh`) so it is pinned.
-- **Interactive sign-off**: `tk d <id>` with stdin and stderr attached to a terminal shows the receipt, any warnings (no eval ran, eval changed after claim), and asks for confirmation.
-- **Auto-accept** (`tk auto <ids>`, terminal only): you approve a task's eval in advance. When the owner submits and that exact eval passes, the task closes as `auto:eval`. Changing the eval revokes the approval. Use it for routine work with a trustworthy check; keep manual sign-off for judgement calls.
-- **Bulk sign-off** (`tk d --pending`): one summary, one confirmation for everything waiting.
+- **Pinned check**: the first claim pins the eval command and an in-process content fingerprint + executable bit of each workspace file it names (and any helper scripts those files source or reference). Re-claiming does not reset the pin, and pinning works even without `git` on `PATH`. If the check changed by sign-off time, `tk d` refuses and says what changed; pass `--accept-changed-eval` to accept it knowingly. Name the check's script in the eval (`sh scripts/check.sh`) so it is pinned.
+- **Interactive sign-off**: `tk d <id>` with stdin and stderr attached to a terminal shows the receipt, any warnings (no eval ran, eval changed after claim), and asks for confirmation. Pass `-y` / `--yes` (`tk d 1 -y`) to skip the `[y/N]` prompt at the terminal.
+- **Non-TTY human runners** (Raycast, Obsidian shell plugins): set `allow_non_tty_yes = true` under `[policy]` in `config.toml` to allow `tk d <id> -y` and `tk auto <id> -y` when no AI agent session environment variables are present.
+- **Auto-accept** (`tk auto <ids>`, terminal only or `-y` with `allow_non_tty_yes`): you approve a task's eval in advance. When the owner submits and that exact eval passes, the task closes as `auto:eval`. Changing the eval revokes the approval. Use it for routine work with a trustworthy check; keep manual sign-off for judgement calls.
+- **Bulk sign-off** (`tk d --pending` or `tk d --pending -y`): one summary, one confirmation for everything waiting.
 - An agent can no longer close a task as your proxy. Approve the check with `tk auto`, or close it yourself at the terminal.
 - This is a workflow harness, not authentication. An agent runs as your OS user, and one that allocates its own pseudo-terminal can pass the terminal check.
 
 ```toml
 [policy]
-require_eval = true        # no-eval tasks cannot reach pending-close
-eval_timeout_secs = 600    # kill a hung eval (and its children); 0 = no limit
+require_eval = true         # no-eval tasks cannot reach pending-close
+eval_timeout_secs = 600     # kill a hung eval (and its children); 0 = no limit
+allow_non_tty_yes = false   # allow `tk d -y` / `tk auto -y` in Raycast/Obsidian when no agent env vars exist
 ```
 
 Concurrent agents are serialized with an advisory `flock` per card on Unix, plus a store-wide lock for id allocation and dependency edits. On Windows the locks are no-ops.
