@@ -2,7 +2,7 @@
 id: tk-001
 title: Publish tkmd repository to GitHub
 type: task
-status: done
+status: archived
 priority: P0
 owner: ken
 topic:
