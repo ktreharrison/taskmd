@@ -1,6 +1,6 @@
 use crate::model::{TaskEvent, TaskStatus};
-use crate::store::config::ScopeSelection;
 use crate::store::TaskStore;
+use crate::store::config::ScopeSelection;
 use anyhow::Result;
 use chrono::Local;
 use std::fs::{self, OpenOptions};

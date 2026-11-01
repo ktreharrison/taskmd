@@ -1707,3 +1707,76 @@ fn test_eval_inputs_pinned_without_git() {
     assert_ne!(inputs1.get("check.sh"), inputs2.get("check.sh"));
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn test_archive_many_and_lockfile_cleanup() {
+    let (store, tmp) = hardening_store("archive-many-locks");
+    for title in ["p1 Task one", "p1 Task two", "p1 Task three"] {
+        store.add_task(title, None, vec![], None, None).unwrap();
+    }
+    for id in ["1", "2", "3"] {
+        store.submit_for_review(id, "ken", None, None).unwrap();
+        store
+            .complete_task_with(id, "ken", None, Approval::Interactive)
+            .unwrap();
+    }
+
+    // Verify CardLock unlinked its `.lock` file automatically on drop.
+    let lingering_locks: Vec<_> = fs::read_dir(&store.tasks_path)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".lock")))
+        .collect();
+    assert!(
+        lingering_locks.is_empty(),
+        "expected CardLock drop to unlink .lock files, found: {:?}",
+        lingering_locks
+    );
+
+    // Seed a legacy orphan `.tk-002-task-two.lock` to verify sweep_orphan_locks cleans it up.
+    let legacy_lock = store.tasks_path.join(".tk-002-task-two.lock");
+    fs::write(&legacy_lock, b"").unwrap();
+
+    let archived = store
+        .archive_many(&["2".to_string(), "3".to_string()])
+        .unwrap();
+    assert_eq!(archived, vec!["tk-002".to_string(), "tk-003".to_string()]);
+    assert!(
+        !legacy_lock.exists(),
+        "expected legacy lock file to be swept on archive"
+    );
+
+    // Prune reaches both live `done` cards (tk-001) and archived cards (tk-002).
+    let tk1_path = PathBuf::from(store.find_task("1").unwrap().path);
+    let tk2_path = store.tasks_path.join("archive").join(
+        PathBuf::from(store.find_archived("2").unwrap().path)
+            .file_name()
+            .unwrap(),
+    );
+    let pruned = store
+        .prune_many(&["1".to_string(), "2".to_string()])
+        .unwrap();
+    assert_eq!(pruned, vec!["tk-001".to_string(), "tk-002".to_string()]);
+    assert!(!tk1_path.exists());
+    assert!(!tk2_path.exists(), "archived card must be pruned");
+    assert!(!CardLock::lock_path_for(&tk1_path).exists());
+    assert!(
+        store.find_archived("3").is_some(),
+        "unlisted archived card must survive"
+    );
+
+    // Pruned cards leave the store consistent, and their IDs are never reused.
+    assert!(store.integrity_report().unwrap().is_empty());
+    assert_eq!(
+        store
+            .add_task("p1 Task four", None, vec![], None, None)
+            .unwrap()
+            .meta
+            .id,
+        "tk-004"
+    );
+
+    // Bare prune removes every remaining done/archived card, including tk-003 in archive/.
+    assert_eq!(store.prune_many(&[]).unwrap(), vec!["tk-003".to_string()]);
+    let _ = fs::remove_dir_all(&tmp);
+}

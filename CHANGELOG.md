@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-11-01
+
+### Added
+- `tk archive`, `tk prune`, `tk eval`, `tk c` and `tk r` accept several IDs (`tk archive 2 3`, or `tk archive 2,3`), matching `tk d`. Before this, `tk archive 2 3` failed with `unexpected argument '3'`.
+- `TaskStore::archive_many`, `prune_many` and `sweep_orphan_locks`. `archive_tasks` and `prune_tasks` stay as single-ID wrappers.
+
+### Fixed
+- **`tk prune` reaches `tasks/archive/`**: `prune_many` now inspects `tasks/archive/` as well as active cards, so archived cards can be deleted from disk without touching `.events.jsonl`.
+- **No more leftover `.tk-*.lock` files**: `CardLock` deletes its lock file on drop while it still holds `LOCK_EX`. Before, every card that was ever locked left an empty `.lock` file in `tasks/`.
+- `acquire_exclusive` checks that the locked file is still the one at the lock path (device and inode). If another process deleted it in between, it retries, so two processes never hold locks on different files for the same card.
+- `tk archive` and `tk prune` delete the card's lock file. They also sweep orphan `.tk-*.lock` files in both `tasks/` and `tasks/archive/` whose card is gone, which cleans up stores used by older versions.
+
+### Changed
+- `tk eval` with several IDs runs every eval and exits `1` if any of them fail.
+
 ## [0.2.2] - 2026-10-31
 
 ### Added

@@ -1,7 +1,7 @@
 use crate::model::{ReviewReceipt, TaskCard, TaskStatus};
+use crate::store::TaskStore;
 use crate::store::config::Approval;
 use crate::store::eval::has_eval;
-use crate::store::TaskStore;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use std::fs;

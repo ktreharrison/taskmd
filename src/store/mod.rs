@@ -1110,7 +1110,12 @@ views:
     }
 
     /// Promote `blocked` tasks whose blockers are now all closed. Locks each card it rewrites.
-    pub(crate) fn cascade_unblock(&self, completed_id: &str, today: &str, now_ts: &str) -> Result<()> {
+    pub(crate) fn cascade_unblock(
+        &self,
+        completed_id: &str,
+        today: &str,
+        now_ts: &str,
+    ) -> Result<()> {
         let all = self.list_all()?;
         // One status snapshot for the whole cascade: re-reading every card per dependent is quadratic.
         let open: std::collections::HashSet<String> = all
@@ -1562,9 +1567,24 @@ views:
 
     /// Archive completed tasks: moves `done` tasks to `tasks/archive/` and sets `status: archived`.
     /// Preserves full `.events.jsonl` history so DuckDB / `tk st` metrics are 100% intact.
+    #[allow(dead_code)]
     pub fn archive_tasks(&self, id_filter: Option<&str>) -> Result<Vec<String>> {
+        let ids: Vec<String> = id_filter.into_iter().map(str::to_string).collect();
+        self.archive_many(&ids)
+    }
+
+    /// Archive completed tasks matching `ids` (or all `done` tasks when `ids` is empty).
+    pub fn archive_many(&self, ids: &[String]) -> Result<Vec<String>> {
         let archive_dir = self.tasks_path.join("archive");
         fs::create_dir_all(&archive_dir)?;
+
+        let wanted: Vec<String> = ids
+            .iter()
+            .flat_map(|s| s.split(','))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|fid| normalize_id(fid).unwrap_or_else(|| fid.to_string()))
+            .collect();
 
         let all_cards = self.list_all()?;
         let mut archived = Vec::new();
@@ -1573,22 +1593,19 @@ views:
             if card.meta.status != TaskStatus::Done {
                 continue;
             }
-            if let Some(fid) = id_filter
-                && !card
-                    .meta
-                    .id
-                    .eq_ignore_ascii_case(&normalize_id(fid).unwrap_or_else(|| fid.to_string()))
-            {
+            if !wanted.is_empty() && !wanted.iter().any(|w| card.meta.id.eq_ignore_ascii_case(w)) {
                 continue;
             }
 
             let old_path = PathBuf::from(&card.path);
+            let old_lock = CardLock::lock_path_for(&old_path);
             let filename = old_path.file_name().context("Invalid card filename")?;
             let new_path = archive_dir.join(filename);
 
             card.meta.status = TaskStatus::Archived;
             card.path = new_path.to_string_lossy().to_string();
             let _ = fs::rename(&old_path, &new_path);
+            let _ = fs::remove_file(&old_lock);
             self.write_card(&card)?;
 
             let _ = self.log_event(
@@ -1604,31 +1621,45 @@ views:
             archived.push(card.meta.id);
         }
 
+        self.sweep_orphan_locks();
         Ok(archived)
     }
 
     /// Prune completed/archived task notes: deletes `.md` cards from disk while keeping `.events.jsonl` database completely intact!
+    #[allow(dead_code)]
     pub fn prune_tasks(&self, id_filter: Option<&str>) -> Result<Vec<String>> {
-        let all_cards = self.list_all()?;
+        let ids: Vec<String> = id_filter.into_iter().map(str::to_string).collect();
+        self.prune_many(&ids)
+    }
+
+    /// Prune completed/archived task notes matching `ids` (or all completed/archived when `ids` is empty).
+    pub fn prune_many(&self, ids: &[String]) -> Result<Vec<String>> {
+        let wanted: Vec<String> = ids
+            .iter()
+            .flat_map(|s| s.split(','))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|fid| normalize_id(fid).unwrap_or_else(|| fid.to_string()))
+            .collect();
+
+        let mut all_cards = self.list_all()?;
+        all_cards.extend(self.list_archived_cards());
         let mut pruned = Vec::new();
 
         for card in all_cards {
             if card.meta.status != TaskStatus::Done && card.meta.status != TaskStatus::Archived {
                 continue;
             }
-            if let Some(fid) = id_filter
-                && !card
-                    .meta
-                    .id
-                    .eq_ignore_ascii_case(&normalize_id(fid).unwrap_or_else(|| fid.to_string()))
-            {
+            if !wanted.is_empty() && !wanted.iter().any(|w| card.meta.id.eq_ignore_ascii_case(w)) {
                 continue;
             }
 
             let path = PathBuf::from(&card.path);
+            let lock_path = CardLock::lock_path_for(&path);
             if path.exists() {
                 let _ = fs::remove_file(&path);
             }
+            let _ = fs::remove_file(&lock_path);
 
             let _ = self.log_event(
                 &card.meta.id,
@@ -1643,7 +1674,52 @@ views:
             pruned.push(card.meta.id);
         }
 
+        self.sweep_orphan_locks();
         Ok(pruned)
+    }
+
+    /// Cards in `tasks/archive/` (and the peer's archive under `-A`). `list_all` covers only live cards.
+    fn list_archived_cards(&self) -> Vec<TaskCard> {
+        let mut dirs = vec![self.tasks_path.join("archive")];
+        if self.active_scope == ScopeSelection::All
+            && let Some(peer) = &self.peer
+        {
+            dirs.push(peer.tasks_path.join("archive"));
+        }
+        let mut cards = Vec::new();
+        for dir in dirs {
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|x| x == "md")
+                    && let Ok(card) = Self::read_card(&path)
+                {
+                    cards.push(card);
+                }
+            }
+        }
+        cards.sort_by(|a, b| a.meta.id.cmp(&b.meta.id));
+        cards
+    }
+
+    /// Remove any legacy `.tk-*.lock` files in `tasks/` and `tasks/archive/` whose `.md` card is gone.
+    pub fn sweep_orphan_locks(&self) {
+        for dir in [self.tasks_path.clone(), self.tasks_path.join("archive")] {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if let Some(stem) = name.strip_prefix('.').and_then(|s| s.strip_suffix(".lock"))
+                    && stem.starts_with("tk-")
+                    && !dir.join(format!("{stem}.md")).exists()
+                {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
     }
 }
 

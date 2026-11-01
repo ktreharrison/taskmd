@@ -122,11 +122,12 @@ enum Commands {
         /// Task ID (e.g. 1 or tk-001)
         id: String,
     },
-    /// Claim / start a task -> in-progress (alias: `c`)
+    /// Claim / start task(s) -> in-progress (alias: `c`)
     #[command(visible_alias = "c")]
     Claim {
-        /// Task ID (e.g. 1 or tk-001)
-        id: String,
+        /// Task ID(s) (e.g. 1 or tk-001; several: `tk c 1 2 3`)
+        #[arg(required = true, value_delimiter = ',')]
+        ids: Vec<String>,
         /// Who is claiming the task (e.g. claude, codex, hermes, pi). Defaults to the configured owner.
         #[arg(short, long)]
         owner: Option<String>,
@@ -155,19 +156,21 @@ enum Commands {
         #[arg(short, long)]
         set: Option<String>,
     },
-    /// Run the automated eval command on a task
+    /// Run the automated eval command on one or more tasks
     Eval {
-        /// Task ID (e.g. 1 or tk-001)
-        id: String,
+        /// Task ID(s) (e.g. 1 or tk-001; several: `tk eval 1 2 3`)
+        #[arg(required = true, value_delimiter = ',')]
+        ids: Vec<String>,
         /// Who is running the eval. Defaults to the configured owner.
         #[arg(short, long)]
         actor: Option<String>,
     },
-    /// Submit task to pending-close (tk r 1) or view pending sign-off review queue (tk r / tk review)
+    /// Submit task(s) to pending-close (tk r 1 2) or view pending sign-off review queue (tk r / tk review)
     #[command(visible_alias = "r", alias = "rev")]
     Review {
-        /// Task ID (e.g. 1 or tk-001). If omitted, displays review queue of tasks awaiting sign-off.
-        id: Option<String>,
+        /// Task ID(s) (e.g. 1 or tk-001; several: `tk r 1 2`). If omitted, displays review queue of tasks awaiting sign-off.
+        #[arg(value_delimiter = ',')]
+        ids: Vec<String>,
         /// Who is submitting the task for review (default: you at a terminal, `agent` otherwise)
         #[arg(short, long)]
         actor: Option<String>,
@@ -372,13 +375,15 @@ enum Commands {
     },
     /// Archive completed tasks: moves done task .md cards into tasks/archive/ (preserves .events.jsonl DB)
     Archive {
-        /// Optional specific Task ID to archive
-        id: Option<String>,
+        /// Optional specific Task ID(s) to archive (e.g. `tk archive 1 2 3`, or omit to archive all done tasks)
+        #[arg(value_delimiter = ',')]
+        ids: Vec<String>,
     },
     /// Prune completed/archived tasks: removes task .md cards from active disk (preserves .events.jsonl DB for telemetry)
     Prune {
-        /// Optional specific Task ID to prune
-        id: Option<String>,
+        /// Optional specific Task ID(s) to prune (e.g. `tk prune 1 2 3 -f`, or omit to prune all done/archived tasks)
+        #[arg(value_delimiter = ',')]
+        ids: Vec<String>,
         /// Confirm pruning without interactive prompt
         #[arg(short, long)]
         force: bool,
@@ -1235,25 +1240,27 @@ pub fn run() -> Result<()> {
             println!("{}", card.body);
         }
         Commands::Claim {
-            id,
+            ids,
             owner,
             session,
             force,
         } => {
             let owner = owner.unwrap_or_else(|| store.config.default_owner.clone());
-            let card = store.claim_task(&id, &owner, session, force)?;
-            let sess_info = card
-                .meta
-                .resume_command()
-                .map(|cmd| format!(" [session: {AQUA}{cmd}{RESET}]"))
-                .unwrap_or_default();
-            println!(
-                "{ORANGE}▶ Claimed{RESET} {BOLD}{}{RESET} for {} (`in-progress`){}: {}",
-                card.meta.id,
-                color_owner(&card.meta.owner, 9).trim(),
-                sess_info,
-                card.meta.title
-            );
+            for id in &ids {
+                let card = store.claim_task(id, &owner, session.clone(), force)?;
+                let sess_info = card
+                    .meta
+                    .resume_command()
+                    .map(|cmd| format!(" [session: {AQUA}{cmd}{RESET}]"))
+                    .unwrap_or_default();
+                println!(
+                    "{ORANGE}▶ Claimed{RESET} {BOLD}{}{RESET} for {} (`in-progress`){}: {}",
+                    card.meta.id,
+                    color_owner(&card.meta.owner, 9).trim(),
+                    sess_info,
+                    card.meta.title
+                );
+            }
         }
         Commands::Resume {
             id,
@@ -1322,29 +1329,35 @@ pub fn run() -> Result<()> {
                 }
             }
         }
-        Commands::Eval { id, actor } => {
+        Commands::Eval { ids, actor } => {
             let actor = actor.unwrap_or_else(|| store.config.default_owner.clone());
-            let (card, passed, output) = store.run_eval(&id, &actor)?;
-            if passed {
-                println!(
-                    "{GREEN}✅ Eval PASSED{RESET} for {BOLD}{}{RESET}: {}",
-                    card.meta.id, output
-                );
-            } else {
-                println!(
-                    "{RED}❌ Eval FAILED{RESET} for {BOLD}{}{RESET}: {}",
-                    card.meta.id, output
-                );
+            let mut any_failed = false;
+            for id in &ids {
+                let (card, passed, output) = store.run_eval(id, &actor)?;
+                if passed {
+                    println!(
+                        "{GREEN}✅ Eval PASSED{RESET} for {BOLD}{}{RESET}: {}",
+                        card.meta.id, output
+                    );
+                } else {
+                    println!(
+                        "{RED}❌ Eval FAILED{RESET} for {BOLD}{}{RESET}: {}",
+                        card.meta.id, output
+                    );
+                    any_failed = true;
+                }
+            }
+            if any_failed {
                 std::process::exit(1);
             }
         }
         Commands::Review {
-            id,
+            ids,
             actor,
             note,
             session,
         } => {
-            if let Some(task_id) = id {
+            if !ids.is_empty() {
                 let actor = actor.unwrap_or_else(|| {
                     if is_interactive() {
                         store.config.default_owner.clone()
@@ -1352,26 +1365,34 @@ pub fn run() -> Result<()> {
                         "agent".to_string()
                     }
                 });
-                let card = store.submit_for_review(&task_id, &actor, note.as_deref(), session)?;
-                let sess_info = card
-                    .meta
-                    .resume_command()
-                    .map(|cmd| format!(" [resume: `{cmd}`]"))
-                    .unwrap_or_default();
-                let eval_note = match card.meta.receipt.as_ref().map(|r| r.eval_result.as_str()) {
-                    Some("no-eval") => format!("{ORANGE}no eval ran{RESET}"),
-                    _ => "eval passed".to_string(),
-                };
-                if card.meta.status == TaskStatus::Done {
-                    println!(
-                        "{GREEN}⚡ Auto-accepted{RESET} {BOLD}{}{RESET} (`done`): its approved eval passed: {}",
-                        card.meta.id, card.meta.title
-                    );
-                } else {
-                    println!(
-                        "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` ({}){}: {}",
-                        card.meta.id, eval_note, sess_info, card.meta.title
-                    );
+                for task_id in &ids {
+                    let card = store.submit_for_review(
+                        task_id,
+                        &actor,
+                        note.as_deref(),
+                        session.clone(),
+                    )?;
+                    let sess_info = card
+                        .meta
+                        .resume_command()
+                        .map(|cmd| format!(" [resume: `{cmd}`]"))
+                        .unwrap_or_default();
+                    let eval_note = match card.meta.receipt.as_ref().map(|r| r.eval_result.as_str())
+                    {
+                        Some("no-eval") => format!("{ORANGE}no eval ran{RESET}"),
+                        _ => "eval passed".to_string(),
+                    };
+                    if card.meta.status == TaskStatus::Done {
+                        println!(
+                            "{GREEN}⚡ Auto-accepted{RESET} {BOLD}{}{RESET} (`done`): its approved eval passed: {}",
+                            card.meta.id, card.meta.title
+                        );
+                    } else {
+                        println!(
+                            "{PURPLE}🔍 Submitted{RESET} {BOLD}{}{RESET} to `pending-close` ({}){}: {}",
+                            card.meta.id, eval_note, sess_info, card.meta.title
+                        );
+                    }
                 }
             } else {
                 print_review_dashboard(&store)?;
@@ -2463,8 +2484,8 @@ pub fn run() -> Result<()> {
                 );
             }
         }
-        Commands::Archive { id } => {
-            let archived = store.archive_tasks(id.as_deref())?;
+        Commands::Archive { ids } => {
+            let archived = store.archive_many(&ids)?;
             if archived.is_empty() {
                 println!("{DIM}No completed tasks found to archive.{RESET}");
             } else {
@@ -2480,7 +2501,7 @@ pub fn run() -> Result<()> {
                 );
             }
         }
-        Commands::Prune { id, force } => {
+        Commands::Prune { ids, force } => {
             if !force {
                 use std::io::{self, Write};
                 print!(
@@ -2494,7 +2515,7 @@ pub fn run() -> Result<()> {
                     return Ok(());
                 }
             }
-            let pruned = store.prune_tasks(id.as_deref())?;
+            let pruned = store.prune_many(&ids)?;
             if pruned.is_empty() {
                 println!("{DIM}No completed or archived tasks found to prune.{RESET}");
             } else {
@@ -2906,15 +2927,15 @@ mod tests {
         // `tk r` (dashboard view, no id)
         let cli_dash = Cli::try_parse_from(["tk", "r"]).unwrap();
         match cli_dash.command {
-            Some(Commands::Review { id, .. }) => assert!(id.is_none()),
+            Some(Commands::Review { ids, .. }) => assert!(ids.is_empty()),
             other => panic!("Expected Review, got {:?}", other),
         }
 
         // `tk r 1 -n "Ready for review"`
         let cli_sub = Cli::try_parse_from(["tk", "r", "1", "-n", "Ready for review"]).unwrap();
         match cli_sub.command {
-            Some(Commands::Review { id, note, .. }) => {
-                assert_eq!(id.as_deref(), Some("1"));
+            Some(Commands::Review { ids, note, .. }) => {
+                assert_eq!(ids, vec!["1"]);
                 assert_eq!(note.as_deref(), Some("Ready for review"));
             }
             other => panic!("Expected Review with id, got {:?}", other),
@@ -2951,12 +2972,12 @@ mod tests {
                 .unwrap();
         match cli_claim.command {
             Some(Commands::Claim {
-                id,
+                ids,
                 owner,
                 session,
                 force,
             }) => {
-                assert_eq!(id, "1");
+                assert_eq!(ids, vec!["1"]);
                 assert_eq!(owner.as_deref(), Some("claude"));
                 assert_eq!(session.as_deref(), Some("claude -r 999"));
                 assert!(!force);
@@ -3038,10 +3059,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_done_and_auto_yes_flag() {
-        match Cli::try_parse_from(["tk", "d", "1", "-y"])
-            .unwrap()
-            .command
-        {
+        match Cli::try_parse_from(["tk", "d", "1", "-y"]).unwrap().command {
             Some(Commands::Done { ids, yes, .. }) => {
                 assert_eq!(ids, vec!["1"]);
                 assert!(yes);
